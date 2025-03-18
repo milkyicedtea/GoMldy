@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  gomldy:
+    image: mldy-backend
+    deploy:
+      replicas: 1
+    secrets:
+      - MELODY_PSQL_URL
+    ports:
+      - "9000:9000"
+
+secrets:
+  MELODY_PSQL_URL:
+    external: true

@@ -1,0 +1,11 @@
+.idea
+
+!*.go
+!go.sum
+
+*.mp3
+*.aac
+*.mp4
+*.m4a
+
+.env
