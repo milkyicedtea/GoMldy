@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"os"
@@ -32,6 +34,7 @@ func CheckRateLimit(ip string) (bool, error) {
 		log.Println("Error while connecting to database: ", err)
 		return true, err
 	}
+	defer db.Release()
 
 	//log.Println("Hashing the IP: ", strings.Split(ip, ":")[0])
 
@@ -49,9 +52,16 @@ func CheckRateLimit(ip string) (bool, error) {
 		hashedIP,
 	).Scan(&downloadCount)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			log.Println("Error while querying row for download rate limits: ", err)
+			downloadCount = 0
+			return false, nil
+		}
 		log.Println("Error while querying database: ", err)
 		return true, err
 	}
+
+	log.Println("Download rate limit check result: ", downloadCount)
 
 	//log.Println("Checking if count is above 5")
 	if downloadCount >= 5 {
@@ -70,15 +80,20 @@ func IncreaseDlCount(ip string) error {
 	}
 	defer dbTx.Release()
 
+	//log.Println("Hashing the IP: ", strings.Split(ip, ":")[0])
+
 	h := sha256.New()
 	h.Write([]byte(strings.Split(ip, ":")[0]))
 	hashedIP := hex.EncodeToString(h.Sum(nil))
 	//log.Println("Hashed IP: ", hashedIP)
 
-	//log.Println("Increasing download count")
-	_, err = dbTx.Exec(
+	log.Println("Increasing download count")
+	_, err = dbTx.Query(
 		context.Background(),
-		`update download_rate_limits set download_count = download_count + 1 where hashed_ip = $1`,
+		`insert into download_rate_limits (hashed_ip, download_count, last_reset)
+		values ($1, 1, current_timestamp)
+		on conflict (hashed_ip)
+		do update set download_count = download_rate_limits.download_count + 1`,
 		hashedIP,
 	)
 	if err != nil {

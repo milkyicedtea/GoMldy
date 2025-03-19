@@ -10,18 +10,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"os/exec"
+	"strings"
 	"time"
 )
 
 type VideoRequest struct {
 	Url            string `json:"url"`
 	RecaptchaToken string `json:"recaptchaToken"`
-}
-
-type CAPTCHARequest struct {
-	Secret   string `json:"secret"`
-	Response string `json:"response"`
 }
 
 type RecaptchaResponse struct {
@@ -50,7 +46,6 @@ func isCaptchaValid(token string) bool {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-
 		}
 	}(resp.Body)
 
@@ -66,7 +61,7 @@ func isCaptchaValid(token string) bool {
 		return false
 	}
 
-	//log.Println(response)
+	log.Println(response)
 
 	if !response.Success {
 		log.Println("Recaptcha validation failed: ", response.ErrorCodes)
@@ -84,11 +79,10 @@ func Download(w http.ResponseWriter, r *http.Request) {
 	video := &VideoRequest{}
 	err := json.NewDecoder(r.Body).Decode(video)
 	if err != nil {
-		log.Println("Failed to decode video request")
+		log.Println("Failed to decode video request:", err)
 		http.Error(w, "Failed to decode video request", http.StatusInternalServerError)
 		return
 	}
-	//log.Println("video: ", video)
 
 	if !isCaptchaValid(video.RecaptchaToken) {
 		http.Error(w, "Recaptcha token invalid or request was not sent by a human!", http.StatusForbidden)
@@ -117,81 +111,103 @@ func Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//log.Printf("video url: %s, video object: %s", video.Url, video)
-
-	filenameChan := make(chan string)
-
-	tempDir, err := os.MkdirTemp("", "ytdl-temp")
+	ytdlPath, err := ytdlp.Install(context.TODO(), nil)
 	if err != nil {
-		w.Header().Set("Content-Type", "text/plain")
-		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
+		log.Println("Error installing youtlp plugin:", err)
+		http.Error(w, "Error installing youtlp plugin", http.StatusInternalServerError)
 		return
 	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			log.Println("Failed to remove temp directory: ", path)
+
+	metadataCmd := exec.Command(ytdlPath.Executable,
+		"--no-download",
+		"--print-json",
+		"--skip-download",
+		video.Url,
+	)
+
+	metadataOutput, err := metadataCmd.Output()
+	if err != nil {
+		log.Println("Error fetching video metadata:", err)
+		http.Error(w, "Failed to fetch video information", http.StatusInternalServerError)
+		return
+	}
+
+	var videoInfo struct {
+		Title    string `json:"title"`
+		Uploader string `json:"uploader"`
+	}
+	if err := json.Unmarshal(metadataOutput, &videoInfo); err != nil {
+		log.Println("Error parsing video metadata:", err)
+		http.Error(w, "Failed to parse video information", http.StatusInternalServerError)
+		return
+	}
+
+	log.Println("Metadata fetched - Title:", videoInfo.Title, "Uploader:", videoInfo.Uploader)
+	//Extract title and artist from the info
+
+	filename := videoInfo.Title + ".mp3"
+	filename = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`<>:"/\|?*`, r) {
+			return '-'
 		}
-	}(tempDir)
-
-	go func() {
-		ytdlp.MustInstall(context.TODO(), nil)
-
-		dl := ytdlp.New().
-			Format("bestaudio").
-			ExtractAudio().
-			EmbedMetadata().
-			AudioFormat("mp3").
-			Output(filepath.Join(tempDir, "%(title)s.%(ext)s"))
-
-		_, err = dl.Run(context.TODO(), video.Url)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/plain")
-			http.Error(w, "Download failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		files, err := filepath.Glob(filepath.Join(tempDir, "*.mp3"))
-		if err != nil || len(files) == 0 {
-			w.Header().Set("Content-Type", "text/plain")
-			http.Error(w, "Failed to find downloaded file", http.StatusInternalServerError)
-			return
-		}
-		tempFile := files[0]
-		filename := filepath.Base(tempFile)
-
-		filenameChan <- filename
-	}()
-
-	filename := <-filenameChan
+		return r
+	}, filename)
 
 	encodedFilename := url.PathEscape(filename)
-
 	w.Header().Set("Content-Disposition", `attachment; filename="`+encodedFilename+`"`)
-	w.Header().Set("Content-Type", "audio/mpeg; charset=utf-8")
+	w.Header().Set("Content-Type", "audio/mpeg")
 
-	file, err := os.Open(filepath.Join(tempDir, filename))
+	log.Println("Executing cmd")
+	ytdlCmd := exec.Command(ytdlPath.Executable,
+		"--format", "bestaudio[ext!=webm]", // Pick best MP3-compatible format
+		"--no-cache-dir",
+		"--output", "-",
+		video.Url,
+	)
+
+	ffmpegCmd := exec.Command("ffmpeg",
+		"-i", "pipe:0", // Read from yt-dlp output
+		"-vn",         // Remove any video
+		"-ab", "320k", // High-quality audio
+		"-ar", "48000", // Standard sampling rate
+		"-metadata", "title="+videoInfo.Title,
+		"-metadata", "artist="+videoInfo.Uploader,
+		"-f", "mp3", // Output format MP3
+		"pipe:1", // Stream to client
+	)
+
+	// Connect yt-dlp -> FFmpeg
+	ytdlOut, err := ytdlCmd.StdoutPipe()
 	if err != nil {
-		w.Header().Set("Content-Type", "text/plain")
-		http.Error(w, "Failed to open downloaded file", http.StatusInternalServerError)
+		log.Println("Error creating yt-dlp pipe:", err)
+		http.Error(w, "Failed to process video", http.StatusInternalServerError)
 		return
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			log.Printf("Failed to close file: %s: %s", file.Name(), err.Error())
-		}
-	}(file)
+	ffmpegCmd.Stdin = ytdlOut
+	ffmpegCmd.Stdout = w
 
-	_, err = io.Copy(w, file)
-	if err != nil {
-		log.Println("Error streaming file: ", err.Error())
+	// Start yt-dlp
+	if err := ytdlCmd.Start(); err != nil {
+		log.Println("Error starting yt-dlp:", err)
+		http.Error(w, "Failed to start yt-dlp", http.StatusInternalServerError)
 		return
+	}
+
+	// Start FFmpeg
+	if err := ffmpegCmd.Run(); err != nil {
+		log.Println("Error running FFmpeg:", err)
+		http.Error(w, "Failed to process audio", http.StatusInternalServerError)
+		return
+	}
+
+	// Wait for yt-dlp to finish
+	if err := ytdlCmd.Wait(); err != nil {
+		log.Println("yt-dlp finished with error:", err)
 	}
 
 	err = utils.IncreaseDlCount(r.RemoteAddr)
 	if err != nil {
-		log.Println("Error increasing dl count: ", err.Error())
+		log.Println("Error increasing download count:", err)
 		return
 	}
 }

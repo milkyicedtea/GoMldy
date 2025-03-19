@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   gomldy:
@@ -7,9 +7,12 @@ services:
       replicas: 1
     secrets:
       - MELODY_PSQL_URL
+      - RECAPTCHA_SECRET_KEY
     ports:
       - "9000:9000"
 
 secrets:
   MELODY_PSQL_URL:
+    external: true
+  RECAPTCHA_SECRET_KEY:
     external: true

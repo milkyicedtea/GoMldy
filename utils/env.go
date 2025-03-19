@@ -13,7 +13,7 @@ func LoadEnv() {
 
 	if _, err := os.Stat(secretPath); err == nil {
 		fmt.Println("🔒 Loading environment variables from Docker secrets...")
-		secrets := []string{"MODE", "MELODY_PSQL_URL, RECAPTCHA_SECRET_KEY"}
+		secrets := []string{"MODE", "MELODY_PSQL_URL", "RECAPTCHA_SECRET_KEY"}
 
 		for _, secret := range secrets {
 			// Is docker ever dev mode? Not for me, but if yes, just comment this :)
